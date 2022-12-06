@@ -1,12 +1,13 @@
 package main
 
 import ("fmt"
+	"log"
 	"os"
 	"os/exec"
-	"log"
-	"sync"
-	"strings"
 	"regexp"
+	"strings"
+	"sync"
+	"time"
 )
 
 func snortParseAlerts(out string)map[string]int{
@@ -21,24 +22,82 @@ func snortParseAlerts(out string)map[string]int{
 	return scores
 }
 
-func snortDetectorRoutine(wg *sync.WaitGroup, pcapPath string)map[string]int{
-	defer wg.Done()
-	fmt.Println("path: " + pcapPath)
-	argstr := []string{"-c", "sudo snort -r /home/lorenzo/Documents/firewall/2021-12-11-thru-13-server-activity-with-log4j-attempts.pcap -c /etc/snort/snort.conf -A console -q"}
+func snortDetectorRoutine(c chan map[string]int, pcapPath string, confPath string)map[string]int{
+	now := time.Now()
+	defer func() {
+		fmt.Print("\tRuntime = ")
+		fmt.Println(time.Now().Sub(now))
+	}()
+
+	argstr := []string{"-c", "sudo snort -r " + pcapPath + " -c " + confPath + " -A console -q"}
 	out, err := exec.Command("/bin/sh", argstr...).Output()
 	if err != nil{
 		log.Fatalf("%v: exec: snort", err)
 	}
 	scores := snortParseAlerts(string(out))
 
+	fmt.Printf("Snort Attack Detector {%s} Results:\n", confPath)
 	for key, val := range scores{
-		fmt.Printf("%s - score: %d\n", key, val)
+		fmt.Printf("\t%s - score: %d\n", key, val)
 	}
 
+	c <- scores
 	return scores
 }
 
+func attackDetector()map[string]int{
+	c := make(chan map[string]int)
+	go snortDetectorRoutine(c, os.Args[1], "/etc/snort/snort.conf")
+	go snortDetectorRoutine(c, os.Args[1], "/etc/snort/snortDoS.conf")
+	go snortDetectorRoutine(c, os.Args[1], "/etc/snort/snortCommunity.conf")
+	go snortDetectorRoutine(c, os.Args[1], "/etc/snort/snortWeb.conf")
+	numRoutines := 4
+	
+	routineMaps := make([]map[string]int, numRoutines)
+	aggregated := make(map[string]int)
+	for i := 0; i < numRoutines; i++ {
+		routineMaps[i] = <-c
+		for key, val := range routineMaps[i]{
+			aggregated[key] = aggregated[key] + val
+		}
+	}
+	close(c)
+	fmt.Printf("Aggregated Results:\n")
+	for key, val := range aggregated{
+		fmt.Printf("\t%s - score: %d\n", key, val)
+	}
+	return aggregated
+}
+
+func querySecurityFunctionDatabase(attack string)int{
+	numAttacks := 0
+	if attack == "Attempted Denial of Service"{
+		fmt.Printf("\tDDoS detected - initializing RPL black hole mitigation\n")
+		numAttacks++
+	}
+	return numAttacks
+}
+
+func securityFunctionSelection(wg *sync.WaitGroup){
+	defer wg.Done()
+	aggregated := attackDetector()
+	fmt.Printf("\nSecurity Function Selection\n")
+	numAttacks := 0
+	for key, _ := range aggregated{
+		numAttacks += querySecurityFunctionDatabase(key)
+	}
+	if numAttacks == 0{
+		fmt.Printf("\tNo mitigations initialized\n")
+	}
+}
+
 func main(){
+	now := time.Now()
+	defer func() {
+		fmt.Print("\tTotal Runtime = ")
+		fmt.Println(time.Now().Sub(now))
+	}()
+
 	f, err := os.OpenFile("controller.log", os.O_RDWR | os.O_CREATE | os.O_APPEND, 0666)
 	if err != nil{
 		log.Fatalf("error opening file: %v", err)
@@ -54,8 +113,8 @@ func main(){
 		log.Fatal("Error: pcap does not exist or bad permission")
 	}
 
-	var wg sync.WaitGroup
+	wg := new(sync.WaitGroup)
 	wg.Add(1)
-	go snortDetectorRoutine(&wg, os.Args[1])
+	go securityFunctionSelection(wg)
 	wg.Wait()
 }
