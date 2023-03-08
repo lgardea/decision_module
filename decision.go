@@ -6,8 +6,9 @@ import ("fmt"
 	"os/exec"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
+	"encoding/csv"
+	"io"
 )
 
 type Attack struct {
@@ -57,14 +58,92 @@ func snortDetectorRoutine(c chan map[string][]Attack, pcapPath string, confPath 
 	return scores
 }
 
+func fastnetmonParseAlerts(alertPath string)map[string][]Attack{
+	scores := make(map[string][]Attack)
+	f, err := os.Open(alertPath)
+	if err != nil{
+		log.Fatal(err)
+	}
+	defer f.Close()
+	csvReader := csv.NewReader(f)
+	for {
+		rec, err := csvReader.Read()
+		if err == io.EOF{
+			break
+		}
+		if err != nil{
+			log.Fatal(err)
+		}
+		desc := "FastNetMon Guard: IP " + rec[0] + " blocked because " + rec[1] + " attack with power " + rec[2] + " pps"
+		class := "Attempted Denial of Service"
+		src := rec[0]
+		dst := "Unknown"
+		scores[class] = append(scores[class], Attack{desc, class, src, dst})
+	}
+	return scores
+}
+
+func fastnetmonDetectorRoutine(c chan map[string][]Attack, alertPath string)map[string][]Attack{
+	now := time.Now()
+	defer func() {
+		fmt.Print("\tRuntime = ")
+		fmt.Println(time.Now().Sub(now))
+	}()
+
+	scores := fastnetmonParseAlerts(alertPath)
+
+	fmt.Printf("fastnetmon Attack Detector Results:\n")
+	for key, val := range scores{
+		fmt.Printf("\t%s - score: %d\n", key, len(val))
+	}
+
+	c <- scores
+	return scores
+}
+
+func launchAttackDetectors(c chan map[string][]Attack)int{
+	numRoutines := 0
+	f, err := os.Open("controller.conf")
+	if err != nil{
+		log.Fatal(err)
+	}
+	defer f.Close()
+	csvReader := csv.NewReader(f)
+	csvReader.FieldsPerRecord = -1
+	for {
+		rec, err := csvReader.Read()
+		if err == io.EOF{
+			break
+		}
+		if err != nil{
+			log.Fatal(err)
+		}
+		if rec[0] == "snort"{
+			if _, err := os.Stat(rec[1]); err != nil{
+				log.Fatal("Error: pcap does not exist or bad permission")
+			}
+			if _, err := os.Stat(rec[2]); err != nil{
+				log.Fatal("Error: snort conf does not exist or bad permission")
+			}
+			go snortDetectorRoutine(c, rec[1], rec[2])
+			numRoutines++
+		} else if rec[0] == "fastnetmon"{
+			if _, err := os.Stat(rec[1]); err != nil{
+				log.Fatal("Error: fastnetmon note does not exist or bad permission")
+			}
+			go fastnetmonDetectorRoutine(c, rec[1])
+			numRoutines++
+		} else {
+			log.Fatal("Error: unrecognized detector")
+		}
+	}
+
+	return numRoutines
+}
+
 func attackDetector()map[string][]Attack{
 	c := make(chan map[string][]Attack)
-	go snortDetectorRoutine(c, os.Args[1], "/etc/snort/snort.conf")
-	//go snortDetectorRoutine(c, os.Args[1], "/etc/snort/snortDoS.conf")
-	//go snortDetectorRoutine(c, os.Args[1], "/etc/snort/snortCommunity.conf")
-	//go snortDetectorRoutine(c, os.Args[1], "/etc/snort/snortWeb.conf")
-
-	numRoutines := 1
+	numRoutines := launchAttackDetectors(c)
 	routineMaps := make([]map[string][]Attack, numRoutines)
 	aggregated := make(map[string][]Attack)
 	for i := 0; i < numRoutines; i++ {
@@ -95,8 +174,7 @@ func querySecurityFunctionDatabase(attacks []Attack)int{
 	return numAttacks
 }
 
-func securityFunctionSelection(wg *sync.WaitGroup){
-	defer wg.Done()
+func securityFunctionSelection(){
 	aggregated := attackDetector()
 	fmt.Printf("\nSecurity Function Selection\n")
 	numAttacks := 0
@@ -114,24 +192,11 @@ func main(){
 		fmt.Print("\tTotal Runtime = ")
 		fmt.Println(time.Now().Sub(now))
 	}()
-
 	f, err := os.OpenFile("controller.log", os.O_RDWR | os.O_CREATE | os.O_APPEND, 0666)
 	if err != nil{
 		log.Fatalf("error opening file: %v", err)
 	}
 	defer f.Close()
 	log.SetOutput(f)
-	if len(os.Args) != 2{
-		log.Fatal("Error: specify pcap path")
-	}
-	if _, err := os.Stat(os.Args[1]); err == nil{
-		fmt.Println(os.Args[1] + " exists")
-	} else{
-		log.Fatal("Error: pcap does not exist or bad permission")
-	}
-
-	wg := new(sync.WaitGroup)
-	wg.Add(1)
-	go securityFunctionSelection(wg)
-	wg.Wait()
+	securityFunctionSelection()
 }
